@@ -1,0 +1,372 @@
+-------------------------------------------------------------------------------
+GRAMMAR
+
+chunk ::= block
+
+block ::= {stat} [retstat]
+
+stat ::=  ‘;’ | 
+	 varlist ‘=’ explist | 
+	 functioncall | 
+	 label | 
+	 break | 
+	 goto Name | 
+	 do block end | 
+	 while exp do block end | 
+	 repeat block until exp | 
+	 if exp then block {elseif exp then block} [else block] end | 
+	 for Name ‘=’ exp ‘,’ exp [‘,’ exp] do block end | 
+	 for namelist in explist do block end | 
+	 function funcname funcbody | 
+	 local function Name funcbody | 
+	 local namelist [‘=’ explist]
+
+retstat ::= return [explist] [‘;’]
+
+label ::= ‘::’ Name ‘::’
+
+funcname ::= Name {‘.’ Name} [‘:’ Name]
+
+varlist ::= var {‘,’ var}
+
+var ::=  Name | prefixexp ‘[’ exp ‘]’ | prefixexp ‘.’ Name 
+
+namelist ::= Name {‘,’ Name}
+
+explist ::= exp {‘,’ exp}
+
+exp ::=  nil | false | true | Numeral | LiteralString | ‘...’ | functiondef | 
+	 prefixexp | tableconstructor | exp binop exp | unop exp 
+
+prefixexp ::= var | functioncall | ‘(’ exp ‘)’
+
+functioncall ::=  prefixexp args | prefixexp ‘:’ Name args 
+
+args ::=  ‘(’ [explist] ‘)’ | tableconstructor | LiteralString 
+
+functiondef ::= function funcbody
+
+funcbody ::= ‘(’ [parlist] ‘)’ block end
+
+parlist ::= namelist [‘,’ ‘...’] | ‘...’
+
+tableconstructor ::= ‘{’ [fieldlist] ‘}’
+
+fieldlist ::= field {fieldsep field} [fieldsep]
+
+field ::= ‘[’ exp ‘]’ ‘=’ exp | Name ‘=’ exp | exp
+
+fieldsep ::= ‘,’ | ‘;’
+
+binop ::=  ‘+’ | ‘-’ | ‘*’ | ‘/’ | ‘//’ | ‘^’ | ‘%’ | 
+	 ‘&’ | ‘~’ | ‘|’ | ‘>>’ | ‘<<’ | ‘..’ | 
+	 ‘<’ | ‘<=’ | ‘>’ | ‘>=’ | ‘==’ | ‘~=’ | 
+	 and | or
+
+unop ::= ‘-’ | not | ‘#’ | ‘~’
+
+
+-------------------------------------------------------------------------------
+REMOVING LEFT RECURSION
+
+var -> Name
+var -> prefixexp ‘[’ exp ‘]’
+var -> prefixexp ‘.’ Name
+
+prefixexp -> var
+prefixexp -> functioncall
+prefixexp -> ‘(’ exp ‘)’
+
+functioncall -> prefixexp args
+functioncall -> prefixexp ‘:’ Name args
+
+ORDER
+functioncall < var < prefixexp
+
+CHANGE INTO
+var -> Name
+var -> prefixexp ‘[’ exp ‘]’
+var -> prefixexp ‘.’ Name 
+
+prefixexp -> Name
+prefixexp -> ‘(’ exp ‘)’
+prefixexp -> prefixexp ‘[’ exp ‘]’
+prefixexp -> prefixexp ‘.’ Name 
+prefixexp -> prefixexp args
+prefixexp -> prefixexp ‘:’ Name args 
+
+functioncall -> prefixexp args
+functioncall -> prefixexp ‘:’ Name args 
+
+REMOVING DIRECT LEFT RECURSION
+
+prefixexp -> Name
+prefixexp -> ‘(’ exp ‘)’
+prefixexp -> prefixexp ‘[’ exp ‘]’
+prefixexp -> prefixexp ‘.’ Name 
+prefixexp -> prefixexp args
+prefixexp -> prefixexp ‘:’ Name args 
+
+CHANGE INTO
+prefixexp -> Name prefixexpcont
+prefixexp -> ‘(’ exp ‘)’ prefixexpcont
+prefixexpcont -> ‘[’ exp ‘]’ prefixexpcont
+prefixexpcont -> ‘.’ Name prefixexpcont
+prefixexpcont -> args prefixexpcont
+prefixexpcont -> ‘:’ Name args prefixexpcont
+prefixexpcont -> epsilon
+
+WHICH CAN BE REWRITTEN USING OPTIONAL SYNTAX AS
+prefixexp -> Name [prefixexpcont]
+prefixexp -> ‘(’ exp ‘)’ [prefixexpcont]
+prefixexpcont -> ‘[’ exp ‘]’ [prefixexpcont]
+prefixexpcont -> ‘.’ Name [prefixexpcont]
+prefixexpcont -> args [prefixexpcont]
+prefixexpcont -> ‘:’ Name args [prefixexpcont]
+
+-------------------------------------------------------------------------------
+DEALING WITH UNPREDICTABLE PRODUCTIONS
+stat -> varlist ‘=’ explist
+stat -> functioncall
+varlist -> var {‘,’ var}
+var -> Name
+var -> prefixexp ‘[’ exp ‘]’
+var -> prefixexp ‘.’ Name
+functioncall -> prefixexp args
+functioncall -> prefixexp ‘:’ Name args 
+
+Both stat productions will always begin with prefixexp.
+Both var and functioncall are a subset of prefixexp.
+The prefixexp function will consume all tokens of var and functioncall,
+making var and functioncall impossible to parse with a simple recursive descent.
+However, we can use the information of the prefixexp AST node to determine if
+the prefixexp could be var or functioncall. To do that, we'll handle both cases
+in one function, making functioncall, var and varlist functions useless.
+
+stat -> varlist ‘=’ explist
+stat -> functioncall
+
+CHANGE INTO
+stat -> prefixexpstat
+prefixexpstat -> functioncall
+prefixexpstat -> varlist '=' explist
+
+Note: varlist, var and functioncall won't be implemented as functions.
+Unpon parsing the first prefixexp, prefixexpstat will be able to decide
+if it's functioncall or varlist.
+
+Alternative: backtracking, but it would be way less efficient, not only would
+it be required in stat to decide between varlist and functioncall, it would be
+also necessary to change var, functioncall, prefixexp and prefixexpcall
+and use backtracking there to differentiate between various subtypes of prefixexp.
+
+For example: 
+functioncall -> Name functioncallcont
+functioncall -> ‘(’ exp ‘)’ functioncallcont
+functioncallcont -> ‘[’ exp ‘]’ functioncallcont
+functioncallcont -> ‘.’ Name functioncallcont
+functioncallcont -> args [functioncallcont]
+functioncallcont -> ‘:’ Name args [functioncallcont]
+
+With these rules, functioncall resembles prefixexp but the recursion can only be
+terminated with <<args>> or <<‘:’ Name args>>. Parsing this would require backtracking.
+We are not going to do that, however, because there is a faster way.
+
+
+There is also a problem with parlist and namelist, namelist is a subset of parlist
+and if parlist called namelist function, and there was a parlist ending with '...'
+on input, it would always end with error as it expects a Name after ','.
+
+parlist -> namelist [‘,’ ‘...’] | ‘...’
+
+CHANGE INTO
+parlist -> Name {‘,’ Name} [‘,’ ‘...’] | ‘...’
+
+-------------------------------------------------------------------------------
+EXPRESSION PARSING
+Expressions will be parsed with pratt operator precedence algorithm, ensuring
+correct association and precedence. All non-operator expression will be grouped
+into a new nonterminal for simplicity.
+
+exp ::= nil | false | true | Numeral | LiteralString | ‘...’ | functiondef | 
+	    prefixexp | tableconstructor | exp binop exp | unop exp 
+        
+CHANGE INTO
+exp ::= nonopexp | exp binop exp | unop exp
+nonopexp ::= nil | false | true | Numeral | LiteralString | ‘...’ | functiondef | 
+	         prefixexp | tableconstructor
+
+-------------------------------------------------------------------------------
+FINAL GRAMMAR
+
+chunk ::= block
+
+block ::= {stat} [retstat] // while match stat, then optional match retstat
+
+stat ::= ‘;’ | 
+         prefixexpstat |
+         label | 
+         break | 
+         goto Name | 
+         do block end | 
+         while exp do block end | 
+         repeat block until exp | 
+         if exp then block {elseif exp then block} [else block] end | 
+         for Name ‘=’ exp ‘,’ exp [‘,’ exp] do block end | // for -> lookahead(2) == '='
+         for namelist in explist do block end | // for
+         function funcname funcbody | 
+         local function Name funcbody | // local -> lookahead(1) == function
+         local namelist [‘=’ explist] // local
+
+retstat ::= return [explist] [‘;’]
+
+prefixexpstat ::= varlist ‘=’ explist |
+                  functioncall
+
+label ::= ‘::’ Name ‘::’
+
+funcname ::= Name {‘.’ Name} [‘:’ Name]
+
+varlist ::= var {‘,’ var}
+
+var ::= Name |
+        prefixexp ‘[’ exp ‘]’ |
+        prefixexp ‘.’ Name
+
+namelist ::= Name {‘,’ Name}
+
+explist ::= exp {‘,’ exp}
+
+exp ::= nonopexp | exp binop exp | unop exp
+// Pratt operator precedence algorithm
+
+nonopexp ::= nil | false | true | Numeral | LiteralString | ‘...’ | functiondef | 
+	         prefixexp | tableconstructor
+
+prefixexp ::= Name prefixexpcont | ‘(’ exp ‘)’ prefixexpcont
+
+prefixexpcont ::= ‘[’ exp ‘]’ prefixexpcont |
+                  ‘.’ Name prefixexpcont |
+                  args prefixexpcont |
+			      ‘:’ Name args prefixexpcont |
+			      epsilon
+
+functioncall ::= prefixexp args |
+                 prefixexp ‘:’ Name args 
+// see stat
+
+args ::=  ‘(’ [explist] ‘)’ | tableconstructor | LiteralString 
+
+functiondef ::= function funcbody
+
+funcbody ::= ‘(’ [parlist] ‘)’ block end
+
+parlist ::= Name {‘,’ Name} [‘,’ ‘...’] | ‘...’
+
+tableconstructor ::= ‘{’ [fieldlist] ‘}’
+
+fieldlist ::= field {fieldsep field} [fieldsep]
+
+field ::= ‘[’ exp ‘]’ ‘=’ exp | Name ‘=’ exp | exp
+
+fieldsep ::= ‘,’ | ‘;’
+
+binop ::= ‘+’ | ‘-’ | ‘*’ | ‘/’ | ‘//’ | ‘^’ | ‘%’ | 
+	 ‘&’ | ‘~’ | ‘|’ | ‘>>’ | ‘<<’ | ‘..’ | 
+	 ‘<’ | ‘<=’ | ‘>’ | ‘>=’ | ‘==’ | ‘~=’ | 
+	 and | or
+
+unop ::= ‘-’ | not | ‘#’ | ‘~’
+
+
+-------------------------------------------------------------------------------
+AST NODES
+
+chunk (block)
+block (stat, ..., retstat)
+label
+var_list(var, ...)
+name_list(name, ...)
+exp_list(exp, ...)
+par_list(name, ...)
+noop
+assign (varlist, explist)
+loc_assign (namelist, explist)
+break
+while (condition, block)
+repeat (block, end_condition)
+if ({condition, block}, ..., block)
+for_num (name, init, end, [step,] block)
+for (namelist, explist, block)
+return (explist)
+func_call(prefixexp, args)
+method_call(prefixexp, name, args)
+goto
+table(field, ...)
+field(key, exp)
+field_seq(exp)
+nil
+true
+false
+num_int
+num_float
+literal
+triple_dot
+var_field (prefixexp, exp)
+method_field (prefixexp, name)
+func_def (parlist, block)
+method_def (parlist, block)
+name
+add (exp1, exp2)
+sub (exp1, exp2)
+mul (exp1, exp2)
+div (exp1, exp2)
+div_floor (exp1, exp2)
+exp (exp1, exp2)
+mod (exp1, exp2)
+bit_and (exp1, exp2)
+bit_xor (exp1, exp2)
+bit_or (exp1, exp2)
+rshift (exp1, exp2)
+lshift (exp1, exp2)
+concat (exp1, exp2)
+lt (exp1, exp2)
+le (exp1, exp2)
+gt (exp1, exp2)
+ge (exp1, exp2)
+eq (exp1, exp2)
+ne (exp1, exp2)
+logic_and (exp1, exp2)
+logic_or (exp1, exp2)
+minus(exp)
+logic_not(exp)
+length(exp)
+bit_not(exp)
+
+
+-------------------------------------------------------------------------------
+LEXER SPECIAL SYMBOLS
+
++
+*
+^
+%
+&
+|
+#
+,
+;
+(
+)
+{
+}
+]
+[ [= [[
+- --
+= ==
+/ //
+~ ~=
+> >> >=
+< << >=
+: ::
+. .. ...
